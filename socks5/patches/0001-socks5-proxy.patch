@@ -1,0 +1,1066 @@
+diff --git a/android-shell/app/src/main/java/dev/t1m3/qplayer/android/ui/QPlayerActivity.java b/android-shell/app/src/main/java/dev/t1m3/qplayer/android/ui/QPlayerActivity.java
+index 51b3bd94102f05c37e1f922bcbe4deca370d363c..86996fbccdc45b1d7e60b23fa630c4f8d1901d64 100644
+--- a/android-shell/app/src/main/java/dev/t1m3/qplayer/android/ui/QPlayerActivity.java
++++ b/android-shell/app/src/main/java/dev/t1m3/qplayer/android/ui/QPlayerActivity.java
+@@ -486,41 +486,7 @@ public final class QPlayerActivity extends Activity {
+     /** Download a single url into {@code out}, reporting progress; false on any failure
+      *  (so the caller can try the next mirror). */
+     private boolean downloadOne(String url, java.io.File out) {
+-        java.net.HttpURLConnection conn = null;
+-        try {
+-            conn = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+-            conn.setInstanceFollowRedirects(true);
+-            conn.setConnectTimeout(15_000);
+-            conn.setReadTimeout(30_000);
+-            conn.setRequestProperty("User-Agent", "qplayer-updater");
+-            int code = conn.getResponseCode();
+-            if (code >= 400) return false;
+-            int total = conn.getContentLength();
+-            try (InputStream in = conn.getInputStream();
+-                 java.io.FileOutputStream fos = new java.io.FileOutputStream(out)) {
+-                byte[] buf = new byte[16384];
+-                long read = 0;
+-                int n;
+-                int lastPct = -1;
+-                while ((n = in.read(buf)) > 0) {
+-                    fos.write(buf, 0, n);
+-                    read += n;
+-                    if (total > 0) {
+-                        int pct = (int) (read * 100 / total);
+-                        if (pct != lastPct) {
+-                            lastPct = pct;
+-                            controller.setUpdateProgress(pct);
+-                        }
+-                    }
+-                }
+-            }
+-            return out.length() > 0;
+-        } catch (Throwable e) {
+-            dev.t1m3.qplayer.util.Logger.warn("update download failed {}: {}", url, e.toString());
+-            return false;
+-        } finally {
+-            if (conn != null) conn.disconnect();
+-        }
++        return dev.t1m3.qplayer.util.UpdateDownloader.downloadOne(url, out, controller::setUpdateProgress);
+     }
+ 
+     /** A downloaded APK awaiting the "install unknown apps" grant; onResume retries it
+diff --git a/desktop-host/src/main/java/dev/t1m3/qplayer/desktop/app/Main.java b/desktop-host/src/main/java/dev/t1m3/qplayer/desktop/app/Main.java
+index 81506ae65c64dd18f9f4da78ebf11e0f7d6c64eb..73b2699c495880278b75f27ca8bacb1babed2495 100644
+--- a/desktop-host/src/main/java/dev/t1m3/qplayer/desktop/app/Main.java
++++ b/desktop-host/src/main/java/dev/t1m3/qplayer/desktop/app/Main.java
+@@ -31,7 +31,6 @@ import com.sun.jna.platform.win32.Shell32;
+ import org.jetbrains.annotations.NotNull;
+ 
+ import java.io.File;
+-import java.io.FileOutputStream;
+ import java.io.InputStream;
+ import java.util.List;
+ import java.util.concurrent.CompletableFuture;
+@@ -501,40 +500,7 @@ public final class Main {
+      *  failure (so the caller can try the next mirror), same contract as the
+      *  Android downloader this mirrors. */
+     private static boolean downloadOne(String url, File out, PlayerController controller) {
+-        java.net.HttpURLConnection conn = null;
+-        try {
+-            conn = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+-            conn.setInstanceFollowRedirects(true);
+-            conn.setConnectTimeout(15_000);
+-            conn.setReadTimeout(30_000);
+-            conn.setRequestProperty("User-Agent", "qplayer-updater");
+-            int code = conn.getResponseCode();
+-            if (code >= 400) return false;
+-            int total = conn.getContentLength();
+-            try (InputStream in = conn.getInputStream(); FileOutputStream fos = new FileOutputStream(out)) {
+-                byte[] buf = new byte[16384];
+-                long read = 0;
+-                int n;
+-                int lastPct = -1;
+-                while ((n = in.read(buf)) > 0) {
+-                    fos.write(buf, 0, n);
+-                    read += n;
+-                    if (total > 0) {
+-                        int pct = (int) (read * 100 / total);
+-                        if (pct != lastPct) {
+-                            lastPct = pct;
+-                            controller.setUpdateProgress(pct);
+-                        }
+-                    }
+-                }
+-            }
+-            return out.length() > 0;
+-        } catch (Throwable e) {
+-            Logger.warn("update download failed {}: {}", url, e.toString());
+-            return false;
+-        } finally {
+-            if (conn != null) conn.disconnect();
+-        }
++        return dev.t1m3.qplayer.util.UpdateDownloader.downloadOne(url, out, controller::setUpdateProgress);
+     }
+ 
+     /** Hand the downloaded installer off to the OS — same "get out of the way,
+diff --git a/desktop-host/src/test/java/dev/t1m3/qplayer/desktop/window/SocksProxySettingRowTest.java b/desktop-host/src/test/java/dev/t1m3/qplayer/desktop/window/SocksProxySettingRowTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..197e62dc7e8b4e4ebd5177fa4048dc5bff04d78c
+--- /dev/null
++++ b/desktop-host/src/test/java/dev/t1m3/qplayer/desktop/window/SocksProxySettingRowTest.java
+@@ -0,0 +1,173 @@
++package dev.t1m3.qplayer.desktop.window;
++
++import dev.t1m3.qplayer.audio.AudioBackend;
++import dev.t1m3.qplayer.bridge.PlayerController;
++import dev.t1m3.qplayer.desktop.resources.ClasspathResourceLoader;
++import dev.t1m3.qplayer.desktop.settings.JsonSettingsStore;
++import dev.t1m3.qplayer.i18n.I18n;
++import dev.t1m3.qplayer.settings.SettingsCatalog;
++import dev.t1m3.qplayer.settings.SettingsCore;
++import dev.t1m3.qplayer.store.AppDirs;
++import dev.t1m3.qplayer.util.NetworkProxy;
++import io.github.timer_err.qml4j.engine.QmlEngine;
++import io.github.timer_err.qml4j.engine.binding.DirtyQueue;
++import io.github.timer_err.qml4j.engine.binding.Property;
++import io.github.timer_err.qml4j.render.QmlView;
++import io.github.timer_err.qml4j.render.items.core.Item;
++import org.junit.Rule;
++import org.junit.Test;
++import org.junit.rules.TemporaryFolder;
++
++import java.lang.reflect.Field;
++import java.lang.reflect.Proxy;
++import java.nio.file.Path;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertNotNull;
++import static org.junit.Assert.assertTrue;
++
++/**
++ * The About page's SOCKS5 row is the only built-in TEXT setting: typing an
++ * endpoint and pressing Enter must persist it and switch GitHub traffic onto the
++ * proxy; an invalid or empty value must leave the proxy off.
++ */
++public class SocksProxySettingRowTest {
++
++    @Rule public final TemporaryFolder temporary = new TemporaryFolder();
++
++    @Test
++    public void typingAnEndpointOnTheAboutPageEnablesTheProxy() throws Exception {
++        String oldBase = AppDirs.base();
++        String oldCache = AppDirs.cacheBase();
++        QmlView view = null;
++        PlayerController player = null;
++        try {
++            Path base = temporary.newFolder().toPath();
++            AppDirs.setBase(base.toString());
++            AppDirs.setCacheBase(base.resolve("cache").toString());
++            AudioBackend backend = (AudioBackend) Proxy.newProxyInstance(
++                    AudioBackend.class.getClassLoader(), new Class<?>[]{AudioBackend.class},
++                    (proxy, method, args) -> {
++                        if (method.getReturnType() == boolean.class) return false;
++                        if (method.getReturnType() == long.class) return 0L;
++                        return null;
++                    });
++            player = new PlayerController(backend, track -> { });
++            // Wired like desktop Main: attach before load so the replay reaches the controller.
++            SettingsCore settings = new SettingsCore();
++            settings.attach(player);
++            settings.load(new JsonSettingsStore(), SettingsCatalog.DESKTOP);
++            assertTrue(settings.has("socksProxy"));
++            assertFalse("blank default leaves the proxy off", NetworkProxy.enabled());
++
++            view = QmlView.withStockTypes(new QmlEngine()).resources(new ClasspathResourceLoader())
++                    .context("player", player).context("settings", settings)
++                    .context("i18n", I18n.instance());
++            view.load("import QtQuick\nimport \"settings\"\n"
++                    + "Item { width: 900; height: 2400\n"
++                    + "  SettingsPage { anchors.fill: parent; currentCategory: \"about\" }\n"
++                    + "}");
++
++            DirtyQueue queue = view.dirtyQueue();
++            queue.install();
++            try {
++                settle(view, queue);
++                // Hidden dialogs (colour picker, ...) carry TextFields too: pick
++                // the one labelled with the SOCKS5 hint.
++                Item input = socksInput(view.root(), I18n.tr("settings.socksProxy.hint"));
++                assertNotNull("the About page shows the SOCKS5 text field", input);
++                assertTrue(Boolean.TRUE.equals(input.visible.peek()));
++
++                type(view, queue, input, "qp:secret@127.0.0.1:7890");
++                assertEquals("qp:secret@127.0.0.1:7890", settings.str("socksProxy"));
++                assertTrue(NetworkProxy.enabled());
++                assertEquals("127.0.0.1:7890", NetworkProxy.describe());
++
++                // A restart replays the persisted value from disk.
++                NetworkProxy.configure("");
++                SettingsCore restarted = new SettingsCore();
++                restarted.attach(player);
++                restarted.load(new JsonSettingsStore(), SettingsCatalog.DESKTOP);
++                assertEquals("qp:secret@127.0.0.1:7890", restarted.str("socksProxy"));
++                assertTrue("the saved proxy is applied again at load", NetworkProxy.enabled());
++
++                type(view, queue, input, "not a proxy");
++                assertFalse("an invalid value turns the proxy off", NetworkProxy.enabled());
++
++                type(view, queue, input, "");
++                assertEquals("", settings.str("socksProxy"));
++                assertFalse(NetworkProxy.enabled());
++            } finally {
++                queue.uninstall();
++            }
++        } finally {
++            NetworkProxy.configure("");
++            if (view != null) view.dispose();
++            if (player != null) player.shutdownAsync().join();
++            AppDirs.setBase(oldBase);
++            AppDirs.setCacheBase(oldCache);
++        }
++    }
++
++    /** Focus by tapping, replace the text the way InputBridge feeds it, then Enter. */
++    private static void type(QmlView view, DirtyQueue queue, Item input, String text) throws Exception {
++        float cx = centreX(input);
++        float cy = centreY(input);
++        view.dispatchPointerDown(cx, cy);
++        view.dispatchPointerUp(cx, cy);
++        queue.flush();
++        property(input, "text").set("");
++        queue.flush();
++        if (!text.isEmpty()) view.dispatchKey(0, text, true);
++        queue.flush();
++        assertEquals(text, property(input, "text").peek());
++        view.dispatchKey(QmlView.KEY_ENTER, null, true);
++        view.dispatchKey(QmlView.KEY_ENTER, null, false);
++        settle(view, queue);
++    }
++
++    /** The TextInput whose sibling label shows {@code hint}. */
++    private static Item socksInput(Item item, String hint) throws Exception {
++        Item input = null;
++        boolean labelled = false;
++        for (Item child : item.children) {
++            String name = child.objectName.peek();
++            if ("miuixTextFieldInput".equals(name)) input = child;
++            if ("miuixTextFieldLabel".equals(name)
++                    && hint.equals(String.valueOf(property(child, "text").peek()))) labelled = true;
++        }
++        if (input != null && labelled) return input;
++        for (Item child : item.children) {
++            Item found = socksInput(child, hint);
++            if (found != null) return found;
++        }
++        return null;
++    }
++
++    @SuppressWarnings("unchecked")
++    private static <T> Property<T> property(Item item, String name) throws Exception {
++        Field field = item.getClass().getField(name);
++        return (Property<T>) field.get(item);
++    }
++
++    private static float centreX(Item item) {
++        float x = item.width.peekFloat() / 2f;
++        for (Item i = item; i != null; i = i.parent.peek()) x += i.x.peekFloat();
++        return x;
++    }
++
++    private static float centreY(Item item) {
++        float y = item.height.peekFloat() / 2f;
++        for (Item i = item; i != null; i = i.parent.peek()) y += i.y.peekFloat();
++        return y;
++    }
++
++    private static void settle(QmlView view, DirtyQueue queue) {
++        for (int i = 0; i < 4; i++) {
++            queue.flush();
++            view.renderer().layoutOnly(view.root());
++        }
++        queue.flush();
++    }
++}
+diff --git a/player-core/src/main/java/dev/t1m3/qplayer/bridge/PlayerController.java b/player-core/src/main/java/dev/t1m3/qplayer/bridge/PlayerController.java
+index 8fcea18552b670c13a164b64a33cd47cf13b1c0e..b4977e7570a5725a8b52da9e537dac9d85ba5895 100644
+--- a/player-core/src/main/java/dev/t1m3/qplayer/bridge/PlayerController.java
++++ b/player-core/src/main/java/dev/t1m3/qplayer/bridge/PlayerController.java
+@@ -67,6 +67,7 @@ import dev.t1m3.qplayer.store.AppDirs;
+ import dev.t1m3.qplayer.store.StorageFiles;
+ import dev.t1m3.qplayer.util.GitHubDownloadUrls;
+ import dev.t1m3.qplayer.util.Logger;
++import dev.t1m3.qplayer.util.NetworkProxy;
+ import dev.t1m3.qplayer.util.QrMatrix;
+ 
+ import io.github.timer_err.qml4j.engine.binding.Property;
+@@ -2214,7 +2215,7 @@ public final class PlayerController {
+                     () -> {
+                         try {
+                             List<PluginCatalogEntry> entries =
+-                                    pluginCatalog.loadLatest(updateMirror);
++                                    pluginCatalog.loadLatest(preferMirror());
+                             markCatalogInstalledState(entries);
+                             final List<PluginCatalogEntry> publishedEntries = entries;
+                             post(
+@@ -2257,7 +2258,7 @@ public final class PlayerController {
+                                     pluginCatalog.downloadAndVerify(
+                                             entry,
+                                             GitHubDownloadUrls.candidates(
+-                                                    entry.downloadUrl, updateMirror));
++                                                    entry.downloadUrl, preferMirror()));
+                             pendingPluginPackage = verified;
+                             pendingPluginPackageTemporary = true;
+                             post(
+@@ -3718,6 +3719,41 @@ public final class PlayerController {
+         }
+     }
+ 
++    /** Last applied SOCKS5 setting; null until the persisted value is replayed at load. */
++    private String socksProxySpec;
++
++    /**
++     * Apply the SOCKS5 setting (GitHub traffic only, see {@link NetworkProxy}). The
++     * load-time replay stays silent unless the stored value is unusable; a later
++     * change from the settings page confirms what took effect.
++     */
++    public void setSocksProxy(String spec) {
++        synchronized (QmlRuntimeLock.MONITOR) {
++            String value = spec == null ? "" : spec.trim();
++            boolean replay = socksProxySpec == null;
++            socksProxySpec = value;
++            if (!NetworkProxy.configure(value)) {
++                Logger.warn("SOCKS5 proxy setting is invalid; GitHub requests go direct");
++                showToast(I18n.tr("toast.socksProxy.invalid"));
++                return;
++            }
++            if (NetworkProxy.enabled()) Logger.info("SOCKS5 proxy for GitHub: {}", NetworkProxy.describe());
++            if (replay) return;
++            showToast(NetworkProxy.enabled()
++                    ? I18n.tr("toast.socksProxy.enabled", NetworkProxy.describe())
++                    : I18n.tr("toast.socksProxy.disabled"));
++        }
++    }
++
++    /**
++     * A configured SOCKS5 proxy reaches GitHub itself, so the direct URL (sent
++     * through the proxy) goes first; the mirrors remain the fallback when the
++     * proxy is unreachable. Without one, the mirror switch decides the order.
++     */
++    private boolean preferMirror() {
++        return updateMirror && !NetworkProxy.enabled();
++    }
++
+     /** Picks this host's own downloadable release asset out of the release's asset
+      *  list (Android: the .apk; desktop: the installer/AppImage for the running OS).
+      *  {@link #checkForUpdate(boolean)} calls this once per asset name, in listed
+@@ -3825,7 +3861,7 @@ public final class PlayerController {
+     /** Build the ordered download urls: mirrors first (when enabled) then the direct
+      *  github url, or direct-first when the mirror is off. Duplicates collapsed. */
+     private String[] downloadCandidates(String apk) {
+-        return GitHubDownloadUrls.candidates(apk, updateMirror);
++        return GitHubDownloadUrls.candidates(apk, preferMirror());
+     }
+ 
+     /** Host injects the running app version (e.g. "0.5.2") for the update compare. */
+@@ -3869,7 +3905,7 @@ public final class PlayerController {
+         synchronized (QmlRuntimeLock.MONITOR) {
+             if (appShuttingDown) return;
+             String version = currentVersion;
+-            boolean mirror = updateMirror;
++            boolean mirror = preferMirror();
+             AssetMatcher matcher = assetMatcher;
+             worker.submit(
+                     () -> {
+diff --git a/player-core/src/main/java/dev/t1m3/qplayer/bridge/ReleaseUpdateChecker.java b/player-core/src/main/java/dev/t1m3/qplayer/bridge/ReleaseUpdateChecker.java
+index e85c25623dc39bfa180881ce9952cd74b0b2a844..bf1520ada54328e20f6541c9e2a48f7e2087e47c 100644
+--- a/player-core/src/main/java/dev/t1m3/qplayer/bridge/ReleaseUpdateChecker.java
++++ b/player-core/src/main/java/dev/t1m3/qplayer/bridge/ReleaseUpdateChecker.java
+@@ -5,6 +5,7 @@ import com.google.gson.JsonObject;
+ import com.google.gson.JsonParser;
+ 
+ import dev.t1m3.qplayer.util.GitHubDownloadUrls;
++import dev.t1m3.qplayer.util.NetworkProxy;
+ 
+ import okhttp3.Call;
+ import okhttp3.OkHttpClient;
+@@ -38,6 +39,7 @@ public final class ReleaseUpdateChecker {
+                         .connectTimeout(10, TimeUnit.SECONDS)
+                         .readTimeout(15, TimeUnit.SECONDS)
+                         .writeTimeout(0, TimeUnit.MILLISECONDS)
++                        .proxySelector(NetworkProxy.selector())
+                         .build();
+     }
+ 
+diff --git a/player-core/src/main/java/dev/t1m3/qplayer/plugin/PluginNetworkOperations.java b/player-core/src/main/java/dev/t1m3/qplayer/plugin/PluginNetworkOperations.java
+index 24259fd087ced2cea690bedf30c6287d9bd858dd..dc74a1dec475604c13973240ac46bab8c6d9598b 100644
+--- a/player-core/src/main/java/dev/t1m3/qplayer/plugin/PluginNetworkOperations.java
++++ b/player-core/src/main/java/dev/t1m3/qplayer/plugin/PluginNetworkOperations.java
+@@ -33,6 +33,9 @@ final class PluginNetworkOperations {
+             .followRedirects(false)
+             .followSslRedirects(false)
+             .writeTimeout(0, TimeUnit.MILLISECONDS)
++            // GitHub catalog/package hosts honor the user's SOCKS5 setting;
++            // every other host keeps the platform default selection.
++            .proxySelector(dev.t1m3.qplayer.util.NetworkProxy.selector())
+             .build();
+     private boolean stopped;
+ 
+diff --git a/player-core/src/main/java/dev/t1m3/qplayer/settings/SettingsCatalog.java b/player-core/src/main/java/dev/t1m3/qplayer/settings/SettingsCatalog.java
+index 290f8d95e07cc77df517fc26a77ae139eed51e07..3ad296d2aaaceb0527152e9e4d1677c8207b81c8 100644
+--- a/player-core/src/main/java/dev/t1m3/qplayer/settings/SettingsCatalog.java
++++ b/player-core/src/main/java/dev/t1m3/qplayer/settings/SettingsCatalog.java
+@@ -567,6 +567,13 @@ public final class SettingsCatalog {
+                 .desc("settings.mirror.desc")
+                 .group("network")
+                 .build());
++        // GitHub-only SOCKS5 exit for people who already run a local proxy
++        // (Clash/v2rayN/sing-box); music hosts never go through it.
++        out.add(SettingSpec.text("socksProxy", ABOUT, "settings.socksProxy.title", "")
++                .desc("settings.socksProxy.desc")
++                .hint("settings.socksProxy.hint")
++                .group("network")
++                .build());
+         out.add(SettingSpec.action("openRepo", ABOUT, "QPlayer", "")
+                 .provider("version").inlineProvider()
+                 // Hard-coded breaks: qml4j's auto-wrap mis-measures this width.
+diff --git a/player-core/src/main/java/dev/t1m3/qplayer/settings/SettingsCore.java b/player-core/src/main/java/dev/t1m3/qplayer/settings/SettingsCore.java
+index ff900dab65cedfbe464eb807c6492fbdd9b5b007..063bcf1a877c0f7c1ba8aca1fc4f72c84bc9647d 100644
+--- a/player-core/src/main/java/dev/t1m3/qplayer/settings/SettingsCore.java
++++ b/player-core/src/main/java/dev/t1m3/qplayer/settings/SettingsCore.java
+@@ -550,6 +550,7 @@ public final class SettingsCore extends QObject implements LyricCompositor.Setti
+         switch (key) {
+             case "monet": controller.setMonetEnabled(bool(key)); break;
+             case "mirror": controller.setUpdateMirror(bool(key)); break;
++            case "socksProxy": controller.setSocksProxy(str(key)); break;
+             case "fade": controller.setFadeEnabled(bool(key)); break;
+             case "highQuality": controller.setHighQualityEnabled(bool(key)); break;
+             case "maxCacheSizeMB": controller.setCacheMaxSizeMB(intOf(key)); break;
+diff --git a/player-core/src/main/java/dev/t1m3/qplayer/util/GitHubDownloadUrls.java b/player-core/src/main/java/dev/t1m3/qplayer/util/GitHubDownloadUrls.java
+index 26a03970602dade1d116da2b4a336064899cc732..104a7a8ab0428fa498502478616f2fe984e44cfb 100644
+--- a/player-core/src/main/java/dev/t1m3/qplayer/util/GitHubDownloadUrls.java
++++ b/player-core/src/main/java/dev/t1m3/qplayer/util/GitHubDownloadUrls.java
+@@ -54,18 +54,22 @@ public final class GitHubDownloadUrls {
+         try {
+             URI uri = new URI(rawUrl);
+             if (!"https".equalsIgnoreCase(uri.getScheme())) return false;
+-            String host = uri.getHost();
+-            if (host == null) return false;
+-            host = host.toLowerCase(Locale.ROOT);
+-            return "github.com".equals(host)
+-                    || host.endsWith(".github.com")
+-                    || "githubusercontent.com".equals(host)
+-                    || host.endsWith(".githubusercontent.com");
++            return isGitHubHost(uri.getHost());
+         } catch (URISyntaxException ignored) {
+             return false;
+         }
+     }
+ 
++    /** github.com, githubusercontent.com and their subdomains. */
++    static boolean isGitHubHost(String host) {
++        if (host == null) return false;
++        host = host.toLowerCase(Locale.ROOT);
++        return "github.com".equals(host)
++                || host.endsWith(".github.com")
++                || "githubusercontent.com".equals(host)
++                || host.endsWith(".githubusercontent.com");
++    }
++
+     private static boolean isMirrored(String rawUrl) {
+         for (String mirror : MIRRORS) if (rawUrl.startsWith(mirror)) return true;
+         return false;
+diff --git a/player-core/src/main/java/dev/t1m3/qplayer/util/NetworkProxy.java b/player-core/src/main/java/dev/t1m3/qplayer/util/NetworkProxy.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..9fa6d644b1c0ee0824d9f44c2d83f675139b9590
+--- /dev/null
++++ b/player-core/src/main/java/dev/t1m3/qplayer/util/NetworkProxy.java
+@@ -0,0 +1,202 @@
++package dev.t1m3.qplayer.util;
++
++import java.io.IOException;
++import java.net.Authenticator;
++import java.net.InetSocketAddress;
++import java.net.PasswordAuthentication;
++import java.net.Proxy;
++import java.net.ProxySelector;
++import java.net.SocketAddress;
++import java.net.URI;
++import java.util.Collections;
++import java.util.List;
++import java.util.Locale;
++
++/**
++ * Optional user SOCKS5 proxy for GitHub traffic: update checks and downloads, the
++ * plugin catalog and plugin packages. Every other host (music APIs, streams,
++ * covers, third-party mirrors) keeps the platform's default proxy selection, so a
++ * foreign exit never sits in front of mainland music services.
++ *
++ * <p>Callers are OkHttp clients using {@link #selector()}. For a SOCKS proxy
++ * OkHttp hands the proxy an unresolved host name, so DNS happens at the proxy
++ * (a JDK {@code URLConnection} would resolve locally first).
++ */
++public final class NetworkProxy {
++    /** A parsed, immutable proxy setting. */
++    static final class Endpoint {
++        final String host;
++        final int port;
++        final String user;
++        final String password;
++        final Proxy proxy;
++
++        Endpoint(String host, int port, String user, String password) {
++            this.host = host;
++            this.port = port;
++            this.user = user;
++            this.password = password;
++            // Unresolved: never block the settings thread on DNS for the proxy host.
++            this.proxy = new Proxy(Proxy.Type.SOCKS, InetSocketAddress.createUnresolved(host, port));
++        }
++    }
++
++    private static volatile Endpoint endpoint;
++    private static boolean authenticatorInstalled;
++
++    private static final ProxySelector SELECTOR = new ProxySelector() {
++        @Override
++        public List<Proxy> select(URI uri) {
++            Proxy proxy = uri == null ? null : proxyForHost(uri.getHost());
++            if (proxy != null) return Collections.singletonList(proxy);
++            ProxySelector platform = ProxySelector.getDefault();
++            if (platform == null || platform == this) return Collections.singletonList(Proxy.NO_PROXY);
++            return platform.select(uri);
++        }
++
++        @Override
++        public void connectFailed(URI uri, SocketAddress address, IOException error) {
++            if (uri != null && proxyForHost(uri.getHost()) != null) return;
++            ProxySelector platform = ProxySelector.getDefault();
++            if (platform != null && platform != this) platform.connectFailed(uri, address, error);
++        }
++    };
++
++    private NetworkProxy() {}
++
++    /**
++     * Apply the user's setting. Accepts {@code host:port}, {@code [ipv6]:port},
++     * an optional {@code user:password@} prefix and an optional {@code socks5://}
++     * / {@code socks5h://} / {@code socks://} scheme. Blank disables the proxy.
++     *
++     * @return false when the text is not a valid proxy; the proxy is then disabled
++     */
++    public static boolean configure(String spec) {
++        Endpoint parsed;
++        try {
++            parsed = parse(spec);
++        } catch (IllegalArgumentException invalid) {
++            endpoint = null;
++            return false;
++        }
++        if (parsed != null && parsed.user != null) installAuthenticator();
++        endpoint = parsed;
++        return true;
++    }
++
++    public static boolean enabled() {
++        return endpoint != null;
++    }
++
++    /** {@code host:port} of the active proxy without credentials, or empty. */
++    public static String describe() {
++        Endpoint e = endpoint;
++        if (e == null) return "";
++        return (e.host.indexOf(':') >= 0 ? "[" + e.host + "]" : e.host) + ":" + e.port;
++    }
++
++    /** Selector for OkHttp clients: the SOCKS proxy for GitHub hosts, platform default otherwise. */
++    public static ProxySelector selector() {
++        return SELECTOR;
++    }
++
++    static Proxy proxyForHost(String host) {
++        Endpoint e = endpoint;
++        if (e == null || !GitHubDownloadUrls.isGitHubHost(host)) return null;
++        return e.proxy;
++    }
++
++    /** Null for blank input; IllegalArgumentException for anything that is not a SOCKS endpoint. */
++    static Endpoint parse(String spec) {
++        if (spec == null) return null;
++        String s = spec.trim();
++        if (s.isEmpty()) return null;
++
++        int scheme = s.indexOf("://");
++        if (scheme >= 0) {
++            String name = s.substring(0, scheme).toLowerCase(Locale.ROOT);
++            if (!name.equals("socks5") && !name.equals("socks5h") && !name.equals("socks")) {
++                throw new IllegalArgumentException("unsupported proxy scheme: " + name);
++            }
++            s = s.substring(scheme + 3);
++        }
++        if (s.endsWith("/")) s = s.substring(0, s.length() - 1);
++
++        String user = null;
++        String password = null;
++        int at = s.lastIndexOf('@');
++        if (at >= 0) {
++            String credentials = s.substring(0, at);
++            s = s.substring(at + 1);
++            int colon = credentials.indexOf(':');
++            user = colon >= 0 ? credentials.substring(0, colon) : credentials;
++            password = colon >= 0 ? credentials.substring(colon + 1) : "";
++            if (user.isEmpty()) throw new IllegalArgumentException("empty proxy user name");
++            // RFC 1929 caps each field at 255 bytes.
++            if (utf8Length(user) > 255 || utf8Length(password) > 255) {
++                throw new IllegalArgumentException("proxy credentials are too long");
++            }
++        }
++
++        String host;
++        String port;
++        if (s.startsWith("[")) {
++            int close = s.indexOf(']');
++            if (close < 0 || close + 1 >= s.length() || s.charAt(close + 1) != ':') {
++                throw new IllegalArgumentException("invalid bracketed proxy host");
++            }
++            host = s.substring(1, close);
++            port = s.substring(close + 2);
++            if (host.isEmpty() || !host.matches("[0-9A-Fa-f:.%a-zA-Z]+") || host.indexOf(':') < 0) {
++                throw new IllegalArgumentException("invalid IPv6 proxy host");
++            }
++        } else {
++            int colon = s.lastIndexOf(':');
++            if (colon <= 0) throw new IllegalArgumentException("proxy needs host:port");
++            host = s.substring(0, colon);
++            port = s.substring(colon + 1);
++            if (host.indexOf(':') >= 0) {
++                throw new IllegalArgumentException("wrap IPv6 proxy hosts in brackets");
++            }
++            if (!host.matches("[A-Za-z0-9._-]+")) {
++                throw new IllegalArgumentException("invalid proxy host");
++            }
++        }
++
++        if (!port.matches("[0-9]{1,5}")) throw new IllegalArgumentException("invalid proxy port");
++        int number = Integer.parseInt(port);
++        if (number < 1 || number > 65535) throw new IllegalArgumentException("proxy port out of range");
++        return new Endpoint(host, number, user, password);
++    }
++
++    private static int utf8Length(String value) {
++        return value.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
++    }
++
++    /**
++     * The JDK's SOCKS client asks {@link Authenticator} for username/password
++     * (RFC 1929). Answer only SOCKS requests for the configured endpoint, so no
++     * other HTTP challenge ever receives these credentials. Installed lazily, and
++     * only once a setting actually carries credentials.
++     */
++    private static synchronized void installAuthenticator() {
++        if (authenticatorInstalled) return;
++        Authenticator.setDefault(new Authenticator() {
++            @Override
++            protected PasswordAuthentication getPasswordAuthentication() {
++                Endpoint e = endpoint;
++                if (e == null || e.user == null) return null;
++                String protocol = getRequestingProtocol();
++                if (protocol == null || !protocol.toUpperCase(Locale.ROOT).startsWith("SOCKS")) {
++                    return null;
++                }
++                String host = getRequestingHost();
++                if (getRequestingPort() != e.port || host == null || !host.equalsIgnoreCase(e.host)) {
++                    return null;
++                }
++                return new PasswordAuthentication(e.user, e.password.toCharArray());
++            }
++        });
++        authenticatorInstalled = true;
++    }
++}
+diff --git a/player-core/src/main/java/dev/t1m3/qplayer/util/UpdateDownloader.java b/player-core/src/main/java/dev/t1m3/qplayer/util/UpdateDownloader.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..06d9de1cc7b881c0f0994ba43a86dfae8e22c3da
+--- /dev/null
++++ b/player-core/src/main/java/dev/t1m3/qplayer/util/UpdateDownloader.java
+@@ -0,0 +1,75 @@
++package dev.t1m3.qplayer.util;
++
++import okhttp3.OkHttpClient;
++import okhttp3.Request;
++import okhttp3.Response;
++import okhttp3.ResponseBody;
++
++import java.io.File;
++import java.io.FileOutputStream;
++import java.io.InputStream;
++import java.util.concurrent.TimeUnit;
++import java.util.function.IntConsumer;
++
++/**
++ * Downloads one application update candidate for the Android and desktop hosts.
++ * OkHttp routes GitHub hosts through {@link NetworkProxy}, handing the SOCKS5
++ * proxy the host name so DNS is resolved remotely rather than by a possibly
++ * polluted local resolver.
++ */
++public final class UpdateDownloader {
++    private static final class Client {
++        static final OkHttpClient INSTANCE = new OkHttpClient.Builder()
++                .connectTimeout(15, TimeUnit.SECONDS)
++                .readTimeout(30, TimeUnit.SECONDS)
++                .writeTimeout(0, TimeUnit.MILLISECONDS)
++                .proxySelector(NetworkProxy.selector())
++                .build();
++    }
++
++    private UpdateDownloader() {}
++
++    /**
++     * Download {@code url} into {@code out}, reporting 0..100 to {@code progress}
++     * when the length is known. Returns false on any failure so the caller can try
++     * the next mirror.
++     */
++    public static boolean downloadOne(String url, File out, IntConsumer progress) {
++        return downloadOne(Client.INSTANCE, url, out, progress);
++    }
++
++    static boolean downloadOne(OkHttpClient client, String url, File out, IntConsumer progress) {
++        Request request = new Request.Builder()
++                .url(url)
++                .header("User-Agent", "qplayer-updater")
++                // Raw bytes keep Content-Length meaningful for the progress bar.
++                .header("Accept-Encoding", "identity")
++                .build();
++        try (Response response = client.newCall(request).execute()) {
++            if (response.code() >= 400) return false;
++            ResponseBody body = response.body();
++            long total = body.contentLength();
++            try (InputStream in = body.byteStream(); FileOutputStream fos = new FileOutputStream(out)) {
++                byte[] buf = new byte[16384];
++                long read = 0;
++                int n;
++                int lastPct = -1;
++                while ((n = in.read(buf)) > 0) {
++                    fos.write(buf, 0, n);
++                    read += n;
++                    if (total > 0) {
++                        int pct = (int) (read * 100 / total);
++                        if (pct != lastPct) {
++                            lastPct = pct;
++                            progress.accept(pct);
++                        }
++                    }
++                }
++            }
++            return out.length() > 0;
++        } catch (Throwable e) {
++            Logger.warn("update download failed {}: {}", url, e.toString());
++            return false;
++        }
++    }
++}
+diff --git a/player-core/src/main/resources/lang/en_US.properties b/player-core/src/main/resources/lang/en_US.properties
+index f329a044750e958eab63809e38fb7f4b479ca725..5d465018b8070090f0d7a8ff52882818c661e748 100644
+--- a/player-core/src/main/resources/lang/en_US.properties
++++ b/player-core/src/main/resources/lang/en_US.properties
+@@ -113,6 +113,9 @@ settings.libraryCardSize.desc=Card width on 我的歌单/本地歌单's grid; on
+ 
+ settings.mirror.title=Download mirror
+ settings.mirror.desc=Route app updates, the plugin catalog and plugin downloads through GitHub Proxy
++settings.socksProxy.title=SOCKS5 proxy
++settings.socksProxy.desc=GitHub only: update checks and downloads, the plugin catalog and plugin installs. When set, GitHub is reached through this proxy first and the download mirrors are only a fallback. Leave empty to disable
++settings.socksProxy.hint=127.0.0.1:7890 or user:password@host:port
+ 
+ settings.volume.title=App volume
+ settings.volume.desc=Adjust QPlayer playback without changing the system output volume
+@@ -568,6 +571,9 @@ toast.keystore.restored=Credentials restored securely from the system keystore
+ 
+ toast.update.upToDate=Already up to date
+ toast.update.checkFailed=Update check failed, try again later
++toast.socksProxy.enabled=GitHub requests now go through SOCKS5 proxy {0}
++toast.socksProxy.disabled=SOCKS5 proxy disabled
++toast.socksProxy.invalid=Invalid SOCKS5 proxy; use host:port. The proxy is off for now
+ 
+ toast.localPlaylist.created=Created the playlist "{0}"
+ toast.localPlaylist.deleted=Playlist deleted
+diff --git a/player-core/src/main/resources/lang/zh_CN.properties b/player-core/src/main/resources/lang/zh_CN.properties
+index a47482d14301ee2113a0f08747fe6f024906ab19..9b875d1e6cfb4ba803ee91a28057b0b690a05e45 100644
+--- a/player-core/src/main/resources/lang/zh_CN.properties
++++ b/player-core/src/main/resources/lang/zh_CN.properties
+@@ -113,6 +113,9 @@ settings.libraryCardSize.desc=调整"我的歌单"和"本地歌单"网格里卡
+ 
+ settings.mirror.title=下载加速镜像
+ settings.mirror.desc=通过 GitHub Proxy 加速应用更新、插件目录、安装和更新
++settings.socksProxy.title=SOCKS5 代理
++settings.socksProxy.desc=仅用于 GitHub：检查更新、下载更新、插件目录与安装。填写后这些请求优先经此代理访问 GitHub，代理不可用时回退到加速镜像；留空关闭
++settings.socksProxy.hint=127.0.0.1:7890 或 用户名:密码@主机:端口
+ 
+ settings.volume.title=应用音量
+ settings.volume.desc=仅调节 QPlayer 的播放音量，不改变系统输出音量
+@@ -568,6 +571,9 @@ toast.keystore.restored=已从系统密钥库安全恢复登录凭据
+ 
+ toast.update.upToDate=已是最新版本
+ toast.update.checkFailed=检查更新失败，请稍后重试
++toast.socksProxy.enabled=GitHub 请求将经 SOCKS5 代理 {0}
++toast.socksProxy.disabled=已关闭 SOCKS5 代理
++toast.socksProxy.invalid=SOCKS5 代理格式无效，应为 主机:端口，已暂不使用代理
+ 
+ toast.queue.playNext=已加入下一首播放
+ toast.custom.added=已加入播放列表
+diff --git a/player-core/src/test/java/dev/t1m3/qplayer/util/NetworkProxyTest.java b/player-core/src/test/java/dev/t1m3/qplayer/util/NetworkProxyTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..c395c6c198c9c4da9313b99773e5312b7de21b08
+--- /dev/null
++++ b/player-core/src/test/java/dev/t1m3/qplayer/util/NetworkProxyTest.java
+@@ -0,0 +1,255 @@
++package dev.t1m3.qplayer.util;
++
++import okhttp3.OkHttpClient;
++import okhttp3.Request;
++import okhttp3.Response;
++
++import org.junit.After;
++import org.junit.Test;
++
++import java.io.DataInputStream;
++import java.io.IOException;
++import java.io.OutputStream;
++import java.net.InetSocketAddress;
++import java.net.Proxy;
++import java.net.ServerSocket;
++import java.net.Socket;
++import java.net.URI;
++import java.nio.charset.StandardCharsets;
++import java.util.List;
++import java.util.concurrent.TimeUnit;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertNotEquals;
++import static org.junit.Assert.assertNull;
++import static org.junit.Assert.assertTrue;
++import static org.junit.Assert.fail;
++
++public class NetworkProxyTest {
++    @After public void reset() {
++        NetworkProxy.configure("");
++    }
++
++    @Test public void parsesCommonForms() {
++        assertNull(NetworkProxy.parse(null));
++        assertNull(NetworkProxy.parse("   "));
++
++        NetworkProxy.Endpoint plain = NetworkProxy.parse(" 127.0.0.1:7890 ");
++        assertEquals("127.0.0.1", plain.host);
++        assertEquals(7890, plain.port);
++        assertNull(plain.user);
++
++        NetworkProxy.Endpoint scheme = NetworkProxy.parse("socks5h://proxy.lan:1080/");
++        assertEquals("proxy.lan", scheme.host);
++        assertEquals(1080, scheme.port);
++
++        NetworkProxy.Endpoint auth = NetworkProxy.parse("socks5://me:p@ss:w@rd@10.0.0.2:1080");
++        assertEquals("me", auth.user);
++        assertEquals("p@ss:w@rd", auth.password);
++        assertEquals("10.0.0.2", auth.host);
++
++        NetworkProxy.Endpoint v6 = NetworkProxy.parse("[::1]:1080");
++        assertEquals("::1", v6.host);
++        assertEquals(1080, v6.port);
++        assertEquals(Proxy.Type.SOCKS, v6.proxy.type());
++        assertTrue(((InetSocketAddress) v6.proxy.address()).isUnresolved());
++    }
++
++    @Test public void rejectsInvalidForms() {
++        String[] invalid = {
++                "127.0.0.1", "127.0.0.1:", ":1080", "host:0", "host:65536", "host:12ab",
++                "http://127.0.0.1:7890", "::1:1080", "[::1]1080", "@host:1080",
++                "bad host:1080", "host/path:1080"
++        };
++        for (String spec : invalid) {
++            try {
++                NetworkProxy.parse(spec);
++                fail("accepted " + spec);
++            } catch (IllegalArgumentException expected) {
++                // expected
++            }
++        }
++        assertTrue(NetworkProxy.configure("127.0.0.1:7890"));
++        assertFalse(NetworkProxy.configure("nonsense"));
++        assertFalse("an invalid setting disables the proxy", NetworkProxy.enabled());
++    }
++
++    @Test public void selectorProxiesGitHubHostsOnly() throws Exception {
++        assertTrue(NetworkProxy.configure("127.0.0.1:7890"));
++        assertEquals("127.0.0.1:7890", NetworkProxy.describe());
++        for (String url : new String[]{
++                "https://api.github.com/repos/a/b/releases/latest",
++                "https://github.com/a/b/releases/download/v1/x.apk",
++                "https://release-assets.githubusercontent.com/x"}) {
++            List<Proxy> selected = NetworkProxy.selector().select(new URI(url));
++            assertEquals(url, Proxy.Type.SOCKS, selected.get(0).type());
++        }
++        for (String url : new String[]{
++                "https://music.163.com/api", "https://gh-proxy.com/https://github.com/a",
++                "https://notgithub.com/x"}) {
++            List<Proxy> selected = NetworkProxy.selector().select(new URI(url));
++            assertNotEquals(url, Proxy.Type.SOCKS, selected.get(0).type());
++        }
++        NetworkProxy.configure("");
++        assertNotEquals(Proxy.Type.SOCKS, NetworkProxy.selector()
++                .select(new URI("https://github.com/")).get(0).type());
++    }
++
++    /** OkHttp sends the GitHub host name (not a locally resolved address) and the credentials. */
++    @Test public void okHttpTunnelsGitHubThroughSocks5WithRemoteDnsAndAuth() throws Exception {
++        try (FakeSocks5 socks = new FakeSocks5("user", "secret")) {
++            assertTrue(NetworkProxy.configure("user:secret@127.0.0.1:" + socks.port()));
++            OkHttpClient client = new OkHttpClient.Builder()
++                    .proxySelector(NetworkProxy.selector())
++                    .connectTimeout(5, TimeUnit.SECONDS)
++                    .readTimeout(5, TimeUnit.SECONDS)
++                    .build();
++            // Plain HTTP so the fake proxy can answer without TLS; routing is host-based.
++            try (Response response = client.newCall(new Request.Builder()
++                    .url("http://api.github.com/repos/a/b").build()).execute()) {
++                assertEquals(200, response.code());
++                assertEquals("via-socks", response.body().string());
++            }
++            assertEquals("api.github.com:80", socks.target);
++            assertEquals(3, socks.addressType); // DOMAINNAME: DNS resolved at the proxy
++            assertEquals("user:secret", socks.credentials);
++            client.connectionPool().evictAll();
++        }
++    }
++
++    /** The hosts' update download path: same proxy, remote DNS, progress, file written. */
++    @Test public void updateDownloaderTunnelsGitHubThroughSocks5() throws Exception {
++        java.io.File out = java.io.File.createTempFile("qplayer-update", ".apk");
++        out.deleteOnExit();
++        try (FakeSocks5 socks = new FakeSocks5(null, null)) {
++            assertTrue(NetworkProxy.configure("127.0.0.1:" + socks.port()));
++            List<Integer> progress = new java.util.ArrayList<>();
++            OkHttpClient client = new OkHttpClient.Builder()
++                    .proxySelector(NetworkProxy.selector())
++                    .connectTimeout(5, TimeUnit.SECONDS)
++                    .readTimeout(5, TimeUnit.SECONDS)
++                    .build();
++            assertTrue(UpdateDownloader.downloadOne(client,
++                    "http://github.com/a/b/releases/download/v1/x.apk", out, progress::add));
++            assertEquals("github.com:80", socks.target);
++            assertEquals(3, socks.addressType);
++            assertNull(socks.credentials);
++            assertEquals("via-socks", new String(java.nio.file.Files.readAllBytes(out.toPath()),
++                    StandardCharsets.UTF_8));
++            assertEquals(Integer.valueOf(100), progress.get(progress.size() - 1));
++        } finally {
++            out.delete();
++        }
++    }
++
++    @Test public void updateDownloaderReportsAnUnreachableProxyAsFailure() throws Exception {
++        java.io.File out = java.io.File.createTempFile("qplayer-update", ".apk");
++        out.deleteOnExit();
++        int closedPort;
++        try (ServerSocket probe = new ServerSocket(0)) {
++            closedPort = probe.getLocalPort();
++        }
++        assertTrue(NetworkProxy.configure("127.0.0.1:" + closedPort));
++        try {
++            assertFalse(UpdateDownloader.downloadOne(
++                    "http://github.com/a/b/releases/download/v1/x.apk", out, pct -> { }));
++        } finally {
++            out.delete();
++        }
++    }
++
++    /**
++     * One-connection RFC 1928/1929 server. After CONNECT it answers the tunnelled
++     * HTTP request itself instead of dialling out, so the test needs no network.
++     */
++    private static final class FakeSocks5 implements AutoCloseable {
++        private final ServerSocket server = new ServerSocket(0, 1,
++                java.net.InetAddress.getByName("127.0.0.1"));
++        private final Thread thread;
++        private final String user;
++        private final String password;
++        volatile String target;
++        volatile int addressType;
++        volatile String credentials;
++
++        FakeSocks5(String user, String password) throws IOException {
++            this.user = user;
++            this.password = password;
++            thread = new Thread(this::serve, "fake-socks5");
++            thread.setDaemon(true);
++            thread.start();
++        }
++
++        int port() {
++            return server.getLocalPort();
++        }
++
++        private void serve() {
++            try (Socket socket = server.accept()) {
++                socket.setSoTimeout(5000);
++                DataInputStream in = new DataInputStream(socket.getInputStream());
++                OutputStream out = socket.getOutputStream();
++                if (in.readUnsignedByte() != 5) return;
++                int methods = in.readUnsignedByte();
++                boolean offersAuth = false;
++                for (int i = 0; i < methods; i++) offersAuth |= in.readUnsignedByte() == 2;
++                if (user != null) {
++                    if (!offersAuth) return;
++                    out.write(new byte[]{5, 2});
++                    out.flush();
++                    in.readUnsignedByte(); // sub-negotiation version 1
++                    byte[] name = new byte[in.readUnsignedByte()];
++                    in.readFully(name);
++                    byte[] pass = new byte[in.readUnsignedByte()];
++                    in.readFully(pass);
++                    credentials = new String(name, StandardCharsets.UTF_8) + ":"
++                            + new String(pass, StandardCharsets.UTF_8);
++                    boolean ok = credentials.equals(user + ":" + password);
++                    out.write(new byte[]{1, (byte) (ok ? 0 : 1)});
++                    out.flush();
++                    if (!ok) return;
++                } else {
++                    out.write(new byte[]{5, 0});
++                    out.flush();
++                }
++                in.readUnsignedByte(); // version
++                if (in.readUnsignedByte() != 1) return; // CONNECT only
++                in.readUnsignedByte(); // reserved
++                addressType = in.readUnsignedByte();
++                String host;
++                if (addressType == 3) {
++                    byte[] name = new byte[in.readUnsignedByte()];
++                    in.readFully(name);
++                    host = new String(name, StandardCharsets.US_ASCII);
++                } else {
++                    byte[] raw = new byte[addressType == 4 ? 16 : 4];
++                    in.readFully(raw);
++                    host = java.net.InetAddress.getByAddress(raw).getHostAddress();
++                }
++                int port = in.readUnsignedShort();
++                target = host + ":" + port;
++                out.write(new byte[]{5, 0, 0, 1, 127, 0, 0, 1, 0, 0});
++                out.flush();
++
++                // Tunnelled HTTP request: drain the head, then answer.
++                int matched = 0;
++                while (matched < 4) {
++                    int b = in.read();
++                    if (b < 0) return;
++                    matched = (b == "\r\n\r\n".charAt(matched)) ? matched + 1 : (b == '\r' ? 1 : 0);
++                }
++                out.write(("HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nvia-socks")
++                        .getBytes(StandardCharsets.US_ASCII));
++                out.flush();
++            } catch (IOException ignored) {
++                // The assertions report what the client did or did not send.
++            }
++        }
++
++        @Override public void close() throws Exception {
++            server.close();
++            thread.join(5000);
++        }
++    }
++}

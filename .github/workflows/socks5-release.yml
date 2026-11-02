@@ -1,0 +1,254 @@
+# Follows TIMER-err/qplayer releases and publishes a Windows build with the
+# GitHub-only SOCKS5 proxy patch (socks5/patches) as <tag>-socks5 in this fork.
+# The patched app checks this fork's releases for updates, so in-app updates
+# keep the patch. A patch that no longer applies opens an issue here.
+name: SOCKS5 Windows build
+
+on:
+  schedule:
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Upstream tag to build (empty = latest upstream release)
+        required: false
+        default: ''
+      force:
+        description: Rebuild and replace an existing <tag>-socks5 release
+        type: boolean
+        default: false
+  push:
+    branches: [master]
+    paths:
+      - 'socks5/**'
+      - '.github/workflows/socks5-release.yml'
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: socks5-release
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: TIMER-err/qplayer
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.pick.outputs.tag }}
+      build: ${{ steps.pick.outputs.build }}
+    steps:
+      - id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+          # A push changes the patch or this workflow: rebuild the current release.
+          FORCE: ${{ inputs.force || github.event_name == 'push' }}
+        run: |
+          tag="$INPUT_TAG"
+          [ -n "$tag" ] || tag=$(gh api "repos/$UPSTREAM/releases/latest" --jq .tag_name)
+          [ -n "$tag" ] || { echo "::error::no upstream release found"; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag-socks5" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1 && [ "$FORCE" != true ]; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "$tag-socks5 is already published"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "building $tag-socks5"
+          fi
+
+  windows:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      TAG: ${{ needs.check.outputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Keep LF line endings (patches must apply byte-exact)
+        shell: bash
+        run: git config --global core.autocrlf false
+
+      - name: Checkout fork (patches)
+        uses: actions/checkout@v5
+        with:
+          path: fork
+
+      - name: Checkout upstream release
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.UPSTREAM }}
+          ref: ${{ needs.check.outputs.tag }}
+          path: src
+          # Full history lets git apply --3way find the patch's pre-image blobs.
+          fetch-depth: 0
+
+      - name: Apply SOCKS5 patches
+        id: patch
+        shell: bash
+        working-directory: src
+        run: |
+          set -euo pipefail
+          mkdir -p ../logs
+          git config user.name "socks5-build"
+          git config user.email "socks5-build@users.noreply.github.com"
+          for p in ../fork/socks5/patches/*.patch; do
+            echo "applying $p"
+            if ! git apply --3way --whitespace=nowarn "$p" > "../logs/patch.log" 2>&1; then
+              cat ../logs/patch.log
+              git status --short >> ../logs/patch.log || true
+              echo "::error::$(basename "$p") does not apply to $TAG"
+              exit 1
+            fi
+          done
+          if git diff --name-only --diff-filter=U | grep -q .; then
+            echo "::error::unresolved conflicts"; git diff --name-only --diff-filter=U | tee -a ../logs/patch.log; exit 1
+          fi
+          # In-app update checks follow this fork, so updates keep the patch.
+          f=player-core/src/main/java/dev/t1m3/qplayer/bridge/ReleaseUpdateChecker.java
+          grep -q "repos/$UPSTREAM/releases/latest" "$f" || { echo "::error::release API URL not found in $f" | tee -a ../logs/patch.log; exit 1; }
+          sed -i "s#repos/$UPSTREAM/releases/latest#repos/$GITHUB_REPOSITORY/releases/latest#" "$f"
+          grep -n "releases/latest" "$f"
+          git status --short
+
+      - name: Read upstream toolchain pins
+        id: pins
+        shell: bash
+        run: |
+          wf=src/.github/workflows/release.yml
+          block=$(awk '/graalvm\/setup-graalvm/{f=1} f&&/^[[:space:]]+-[[:space:]]+name:/{exit} f' "$wf")
+          gv=$(sed -nE "s/^[[:space:]]+version:[[:space:]]*'?([^' ]+)'?.*/\1/p" <<< "$block" | head -1)
+          jv=$(sed -nE "s/^[[:space:]]+java-version:[[:space:]]*'?([^' ]+)'?.*/\1/p" <<< "$block" | head -1)
+          wv=$(grep -oE 'Microsoft\.Web\.WebView2 -Version [0-9.]+' "$wf" | head -1 | awk '{print $3}')
+          echo "graalvm=${gv:-25.4.4.1.1}" >> "$GITHUB_OUTPUT"
+          echo "java=${jv:-25}" >> "$GITHUB_OUTPUT"
+          echo "webview2=${wv:-1.0.2592.51}" >> "$GITHUB_OUTPUT"
+          echo "graalvm=${gv:-?} java=${jv:-?} webview2=${wv:-?}"
+
+      - name: Set up GraalVM
+        uses: graalvm/setup-graalvm@v1
+        with:
+          distribution: graalvm-community
+          version: ${{ steps.pins.outputs.graalvm }}
+          java-version: ${{ steps.pins.outputs.java }}
+          check-for-updates: 'false'
+          native-image-job-reports: 'false'
+
+      - name: Set up Windows C++ toolchain
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install WebView2 build SDK
+        shell: pwsh
+        run: |
+          $v = '${{ steps.pins.outputs.webview2 }}'
+          $sdkRoot = "$env:RUNNER_TEMP\webview2-sdk"
+          nuget install Microsoft.Web.WebView2 -Version $v -OutputDirectory $sdkRoot -NonInteractive -Source https://api.nuget.org/v3/index.json
+          if ($LASTEXITCODE -ne 0) { throw "WebView2 SDK download failed" }
+          "WEBVIEW2_SDK=$sdkRoot\Microsoft.Web.WebView2.$v" >> $env:GITHUB_ENV
+          "CMAKE_GENERATOR=Ninja" >> $env:GITHUB_ENV
+          "CXX=cl.exe" >> $env:GITHUB_ENV
+
+      - name: Cache Maven repository
+        uses: actions/cache@v5
+        with:
+          path: ~/.m2/repository
+          key: Windows-m2-socks5-${{ hashFiles('src/**/pom.xml') }}
+          restore-keys: Windows-m2-socks5-
+
+      - name: Build core and run proxy tests
+        shell: bash
+        working-directory: src
+        run: |
+          set -o pipefail
+          mvn -B -ntp -DskipTests -pl player-core -am install 2>&1 | tee ../logs/core.log
+          mvn -B -ntp -pl player-core surefire:test \
+            -Dtest='NetworkProxyTest,GitHubDownloadUrlsTest' -Dsurefire.failIfNoSpecifiedTests=false 2>&1 | tee ../logs/tests.log
+
+      - name: Compile native app
+        shell: bash
+        working-directory: src
+        run: |
+          set -o pipefail
+          VER="${TAG#v}"
+          mvn -B -ntp -DskipTests -Dqplayer.app.version="$VER" -pl desktop-host -am -Pdist package 2>&1 | tee ../logs/native.log
+
+      - name: Smoke native executable
+        shell: bash
+        working-directory: src
+        run: desktop-host/target/qplayer.exe --build-smoke 2>&1 | tail -20
+
+      - name: Package zip and installer
+        shell: pwsh
+        working-directory: src
+        run: |
+          $ver = $env:TAG -replace '^v',''
+          $env:QPLAYER_VERSION = $ver
+          powershell -ExecutionPolicy Bypass -File desktop-host/dist/package-windows.ps1
+          if ($LASTEXITCODE -ne 0) { throw "package-windows.ps1 failed" }
+          choco install innosetup -y --no-progress
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & "$iscc" /DAppVersion="$ver-socks5" `
+            /DSourceFolder="$PWD\desktop-host\target\QPlayer" `
+            /DIconFile="$PWD\desktop-host\src\main\resources\app-icon.ico" `
+            "desktop-host\dist\qplayer.iss"
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup compiler failed ($LASTEXITCODE)" }
+          New-Item -ItemType Directory -Force ..\out | Out-Null
+          Copy-Item desktop-host\target\QPlayer-windows-x64.zip ..\out\
+          Copy-Item desktop-host\dist\QPlayer-windows-x64-setup.exe ..\out\
+          Get-ChildItem ..\out | Format-Table Name, Length
+
+      - name: Publish release
+        shell: bash
+        run: |
+          set -euo pipefail
+          rel="$TAG-socks5"
+          ver="${TAG#v}"
+          upstream_notes=$(gh api "repos/$UPSTREAM/releases/tags/$TAG" --jq .body 2>/dev/null || true)
+          {
+            echo "QPlayer $ver（Windows）+ GitHub SOCKS5 代理补丁。"
+            echo
+            echo "- 设置 → 关于 → 网络 → SOCKS5 代理：检查更新、下载更新、插件目录与安装经此代理访问 GitHub。"
+            echo "- 应用内更新检查本仓库的发布，更新后补丁仍在。"
+            echo "- 基于上游 [$TAG](https://github.com/$UPSTREAM/releases/tag/$TAG)，构建于 [${GITHUB_SHA:0:7}]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)。"
+            echo
+            echo "---"
+            echo
+            echo "$upstream_notes"
+          } > notes.md
+          if gh release view "$rel" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release delete "$rel" -R "$GITHUB_REPOSITORY" --cleanup-tag -y
+          fi
+          gh release create "$rel" out/QPlayer-windows-x64-setup.exe out/QPlayer-windows-x64.zip \
+            -R "$GITHUB_REPOSITORY" --title "QPlayer $ver + SOCKS5" \
+            --notes-file notes.md --latest
+
+      - name: Report failure as an issue
+        if: failure()
+        shell: bash
+        run: |
+          title="SOCKS5 构建失败：$TAG"
+          {
+            echo "自动构建 \`$TAG-socks5\` 失败：$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            for f in logs/patch.log logs/tests.log logs/native.log logs/core.log; do
+              [ -s "$f" ] || continue
+              echo "<details><summary>$f（末尾 80 行）</summary>"
+              echo
+              echo '```'
+              tail -n 80 "$f"
+              echo '```'
+              echo "</details>"
+            done
+          } > issue.md
+          existing=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number --jq '.[0].number' || true)
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" -R "$GITHUB_REPOSITORY" --body-file issue.md
+          else
+            gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --body-file issue.md
+          fi
