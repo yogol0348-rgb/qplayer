@@ -21,11 +21,11 @@ on:
     branches: [master]
     paths:
       - 'socks5/**'
-      - '.github/workflows/socks5-release.yml'
 
 permissions:
   contents: write
   issues: write
+  actions: write
 
 concurrency:
   group: socks5-release
@@ -41,6 +41,14 @@ jobs:
       tag: ${{ steps.pick.outputs.tag }}
       build: ${{ steps.pick.outputs.build }}
     steps:
+      # GitHub disables schedules after 60 days without repository activity;
+      # re-enabling from a run keeps the 6-hourly check alive.
+      - name: Keep the schedule alive
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/socks5-release.yml/enable"
+
       - id: pick
         env:
           GH_TOKEN: ${{ github.token }}
